@@ -11,29 +11,106 @@ on:
       - tab-ui
       - simple-ui
       - lite
-  workflow_dispatch: # 必须加上这行，才能显示手动触发按钮
+  workflow_dispatch: # 手动触发开关
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-latest # 适配 Emby 插件编译的 Windows 环境
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+      - name: Checkout code (递归拉取所有文件)
+        uses: actions/checkout@v4
         with:
-          dotnet-version: '6.x'
+          fetch-depth: 0 # 避免浅克隆导致文件缺失
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Setup .NET (适配 netstandard2.1)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '3.1.x' # 官方兼容 netstandard2.1 的 SDK 版本
 
-      - name: Build the project
-        run: dotnet build --no-restore --configuration Release
+      - name: 打印环境信息（调试用）
+        run: |
+          dotnet --version
+          echo "工作目录：${{ github.workspace }}"
+          dir "${{ github.workspace }}" # 查看拉取的文件结构
+        shell: pwsh
 
-      - name: Upload artifact
+      - name: 还原所有依赖（强制还原，避免缓存问题）
+        run: dotnet restore "${{ github.workspace }}" --force
+        shell: pwsh
+
+      - name: 编译项目（打印详细编译日志）
+        run: |
+          # 递归查找解决方案文件（避免硬编码路径错误）
+          $slnFile = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.sln" | Select-Object -First 1
+          if (-not $slnFile) {
+              Write-Error "未找到解决方案文件（.sln），请检查仓库结构"
+              exit 1
+          }
+          echo "找到解决方案文件：$($slnFile.FullName)"
+          
+          # 编译并打印详细日志
+          dotnet build "$($slnFile.FullName)" --configuration Release --no-restore --verbosity detailed
+        shell: pwsh
+
+      - name: 查看编译产物（确认 DLL 是否生成）
+        run: |
+          # 递归查找所有 Release 目录下的 DLL
+          $dllFiles = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "Release" }
+          if (-not $dllFiles) {
+              Write-Error "编译后未生成任何 DLL 文件，请检查编译日志"
+              exit 1
+          }
+          echo "编译生成的 DLL 文件列表："
+          $dllFiles | Format-Table FullName, Name, Length
+        shell: pwsh
+
+      - name: 创建插件输出目录（PowerShell 正确语法）
+        run: |
+          $outputDir = "${{ github.workspace }}\output"
+          # PowerShell 判断目录是否存在，不存在则创建
+          if (-not (Test-Path -Path $outputDir)) {
+              New-Item -ItemType Directory -Path $outputDir | Out-Null
+              echo "已创建输出目录：$outputDir"
+          } else {
+              echo "输出目录已存在：$outputDir"
+          }
+        shell: pwsh
+
+      - name: 复制产物到输出目录（兼容任意路径+分支命名）
+        run: |
+          $outputDir = "${{ github.workspace }}\output"
+          # 根据分支拼接插件名称后缀（lite 分支加 Lite）
+          $pluginSuffix = if ("${{ github.ref_name }}" -eq "lite") { "Lite" } else { "" }
+          $targetDllName = "StrmAssistant$pluginSuffix.dll"
+          
+          # 递归查找目标 DLL（优先匹配带后缀的，找不到则匹配基础名称）
+          $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter $targetDllName | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          if (-not $targetDll) {
+              $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "StrmAssistant.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          }
+          
+          if (-not $targetDll) {
+              Write-Error "未找到 StrmAssistant 相关 DLL，请检查编译产物"
+              exit 1
+          }
+          
+          # 复制目标 DLL 到输出目录
+          echo "找到目标 DLL：$($targetDll.FullName)"
+          Copy-Item $targetDll.FullName -Destination "$outputDir\" -Force
+          
+          # 复制 ChineseConverter.dll（如果存在，不存在则仅提示）
+          $chineseDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "ChineseConverter.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          if ($chineseDll) {
+              echo "找到 ChineseConverter.dll：$($chineseDll.FullName)"
+              Copy-Item $chineseDll.FullName -Destination "$outputDir\" -Force
+          } else {
+              echo "未找到 ChineseConverter.dll，跳过复制（非致命错误）"
+          }
+        shell: pwsh
+
+      - name: 上传编译产物（方便下载）
         uses: actions/upload-artifact@v4
         with:
-          name: StrmAssistant
-          path: ${{ github.workspace }}\output\*
+          name: StrmAssistant-${{ github.ref_name }} # 产物包名带分支名，便于区分
+          path: ${{ github.workspace }}\output\* # 上传输出目录下所有文件

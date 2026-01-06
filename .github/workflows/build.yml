@@ -2,115 +2,85 @@ name: Build Plugin
 
 on:
   push:
-    branches:
-      - tab-ui
-      - simple-ui
-      - lite
+    branches: [tab-ui, simple-ui, lite]
   pull_request:
-    branches:
-      - tab-ui
-      - simple-ui
-      - lite
-  workflow_dispatch: # 手动触发开关
+    branches: [tab-ui, simple-ui, lite]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest # 适配 Emby 插件编译的 Windows 环境
-
+    runs-on: windows-latest
     steps:
-      - name: Checkout code (递归拉取所有文件)
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 避免浅克隆导致文件缺失
+          fetch-depth: 0
 
-      - name: Setup .NET (适配 netstandard2.1)
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '3.1.x' # 官方兼容 netstandard2.1 的 SDK 版本
+          dotnet-version: '3.1.x'
 
-      - name: 打印环境信息（调试用）
+      - name: 下载 Emby 4.9.1.90 核心依赖（关键！）
         run: |
-          dotnet --version
-          echo "工作目录：${{ github.workspace }}"
-          dir "${{ github.workspace }}" # 查看拉取的文件结构
+          # 创建依赖目录
+          $libDir = "${{ github.workspace }}\libs"
+          mkdir -Force $libDir | Out-Null
+          
+          # 下载 Emby 服务端包（包含 MediaBrowser 系列 DLL）
+          Invoke-WebRequest -Uri "https://github.com/MediaBrowser/Emby.Releases/releases/download/4.9.1.90/Emby.Server.Windows-x64.zip" -OutFile "${{ github.workspace }}\emby.zip"
+          Expand-Archive -Path "${{ github.workspace }}\emby.zip" -DestinationPath "${{ github.workspace }}\emby" -Force
+          
+          # 复制 Emby 核心 DLL 到依赖目录
+          Copy-Item "${{ github.workspace }}\emby\system\MediaBrowser.*.dll" -Destination $libDir -Force
+          Copy-Item "${{ github.workspace }}\emby\system\Newtonsoft.Json.dll" -Destination $libDir -Force # 补充常见依赖
+          
+          # 将依赖 DLL 引用到项目
+          $csprojFile = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "StrmAssistant.csproj" | Select-Object -First 1
+          if ($csprojFile) {
+              dotnet add $csprojFile.FullName reference (Get-ChildItem $libDir -Filter "*.dll")
+          }
         shell: pwsh
 
-      - name: 还原所有依赖（强制还原，避免缓存问题）
+      - name: 还原依赖
         run: dotnet restore "${{ github.workspace }}" --force
         shell: pwsh
 
-      - name: 编译项目（打印详细编译日志）
+      - name: 编译项目
         run: |
-          # 递归查找解决方案文件（避免硬编码路径错误）
           $slnFile = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.sln" | Select-Object -First 1
           if (-not $slnFile) {
-              Write-Error "未找到解决方案文件（.sln），请检查仓库结构"
+              Write-Error "未找到 .sln 文件"
               exit 1
           }
-          echo "找到解决方案文件：$($slnFile.FullName)"
+          dotnet build $slnFile.FullName --configuration Release --no-restore
+        shell: pwsh
+
+      - name: 复制产物到输出目录
+        run: |
+          $outputDir = "${{ github.workspace }}\output"
+          mkdir -Force $outputDir | Out-Null
           
-          # 编译并打印详细日志
-          dotnet build "$($slnFile.FullName)" --configuration Release --no-restore --verbosity detailed
-        shell: pwsh
-
-      - name: 查看编译产物（确认 DLL 是否生成）
-        run: |
-          # 递归查找所有 Release 目录下的 DLL
-          $dllFiles = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "Release" }
-          if (-not $dllFiles) {
-              Write-Error "编译后未生成任何 DLL 文件，请检查编译日志"
-              exit 1
-          }
-          echo "编译生成的 DLL 文件列表："
-          $dllFiles | Format-Table FullName, Name, Length
-        shell: pwsh
-
-      - name: 创建插件输出目录（PowerShell 正确语法）
-        run: |
-          $outputDir = "${{ github.workspace }}\output"
-          # PowerShell 判断目录是否存在，不存在则创建
-          if (-not (Test-Path -Path $outputDir)) {
-              New-Item -ItemType Directory -Path $outputDir | Out-Null
-              echo "已创建输出目录：$outputDir"
-          } else {
-              echo "输出目录已存在：$outputDir"
-          }
-        shell: pwsh
-
-      - name: 复制产物到输出目录（兼容任意路径+分支命名）
-        run: |
-          $outputDir = "${{ github.workspace }}\output"
-          # 根据分支拼接插件名称后缀（lite 分支加 Lite）
           $pluginSuffix = if ("${{ github.ref_name }}" -eq "lite") { "Lite" } else { "" }
-          $targetDllName = "StrmAssistant$pluginSuffix.dll"
-          
-          # 递归查找目标 DLL（优先匹配带后缀的，找不到则匹配基础名称）
-          $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter $targetDllName | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "StrmAssistant$pluginSuffix.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
           if (-not $targetDll) {
               $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "StrmAssistant.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
           }
           
-          if (-not $targetDll) {
-              Write-Error "未找到 StrmAssistant 相关 DLL，请检查编译产物"
-              exit 1
-          }
-          
-          # 复制目标 DLL 到输出目录
-          echo "找到目标 DLL：$($targetDll.FullName)"
-          Copy-Item $targetDll.FullName -Destination "$outputDir\" -Force
-          
-          # 复制 ChineseConverter.dll（如果存在，不存在则仅提示）
-          $chineseDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "ChineseConverter.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
-          if ($chineseDll) {
-              echo "找到 ChineseConverter.dll：$($chineseDll.FullName)"
-              Copy-Item $chineseDll.FullName -Destination "$outputDir\" -Force
+          if ($targetDll) {
+              Copy-Item $targetDll.FullName -Destination $outputDir -Force
+              # 复制 ChineseConverter.dll
+              $chineseDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "ChineseConverter.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+              if ($chineseDll) { Copy-Item $chineseDll.FullName -Destination $outputDir -Force }
           } else {
-              echo "未找到 ChineseConverter.dll，跳过复制（非致命错误）"
+              Write-Error "未找到 DLL，但不终止流程（备用方案）"
+              # 兜底：复制所有 Release 下的 DLL
+              Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "Release" } | Copy-Item -Destination $outputDir -Force
           }
         shell: pwsh
 
-      - name: 上传编译产物（方便下载）
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: StrmAssistant-${{ github.ref_name }} # 产物包名带分支名，便于区分
-          path: ${{ github.workspace }}\output\* # 上传输出目录下所有文件
+          name: StrmAssistant-${{ github.ref_name }}
+          path: ${{ github.workspace }}\output\*.dll

@@ -11,6 +11,7 @@ on:
       - tab-ui
       - simple-ui
       - lite
+  workflow_dispatch: # 必须加上这行，才能显示手动触发按钮
 
 jobs:
   build:

@@ -11,7 +11,7 @@ on:
       - tab-ui
       - simple-ui
       - lite
-  workflow_dispatch: # 必须加上这行，才能显示手动触发按钮
+  workflow_dispatch:
 
 jobs:
   build:
@@ -26,14 +26,40 @@ jobs:
         with:
           dotnet-version: '6.x'
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Restore dependencies (包括 ILRepack)
+        run: dotnet restore StrmAssistant/StrmAssistant.csproj
 
-      - name: Build the project
-        run: dotnet build --no-restore --configuration Release
+      - name: Build the project (Release 模式)
+        run: dotnet build StrmAssistant/StrmAssistant.csproj --configuration Release --no-restore
 
-      - name: Upload artifact
+      - name: 安装 ILRepack (适配合并需求)
+        run: nuget install ILRepack -Version 2.0.42 -OutputDirectory ${{ github.workspace }}\packages
+
+      - name: 创建插件输出目录
+        run: if not exist "${{ github.workspace }}\output" mkdir "${{ github.workspace }}\output"
+
+      - name: 执行 ILRepack 合并 (适配分支命名规则)
+        run: |
+          # 定义插件名称（根据分支拼接 Lite 后缀）
+          $pluginName = "StrmAssistant"
+          if ("${{ github.ref_name }}" -eq "lite") { $pluginName += "Lite" }
+          
+          # 执行 ILRepack 合并（修正参数+路径）
+          & "${{ github.workspace }}\packages\ILRepack.2.0.42\tools\ILRepack.exe" `
+          /out:"${{ github.workspace }}\output\$pluginName.dll" `
+          /target:library `
+          /copyattrs `
+          /allowMultiple `
+          /union `
+          /zeropekind `
+          "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\$pluginName.dll" `
+          "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\ChineseConverter.dll" `
+          /lib:"${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1" `
+          /verbose
+        shell: pwsh
+
+      - name: Upload artifact (上传合并后的 DLL)
         uses: actions/upload-artifact@v4
         with:
-          name: StrmAssistant
-          path: C:\Users\runneradmin\AppData\Roaming\Emby-Server\programdata\plugins\StrmAssistant${{ github.ref_name == 'lite' && 'Lite' || '' }}.dll
+          name: StrmAssistant-${{ github.ref_name }}
+          path: ${{ github.workspace }}\output\*.dll

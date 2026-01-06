@@ -11,33 +11,86 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+      - name: Checkout code (递归拉取所有文件)
+        uses: actions/checkout@v4
         with:
-          dotnet-version: '6.x'
+          fetch-depth: 0 # 避免部分文件未拉取
 
-      - name: Restore dependencies
-        run: dotnet restore StrmAssistant.sln
+      - name: Setup .NET (适配 netstandard2.1)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '3.1.x' # 比6.x更兼容netstandard2.1
 
-      - name: Build the project
-        run: dotnet build StrmAssistant.sln --configuration Release --no-restore
-
-      - name: 查看编译产物（调试用）
-        run: dir "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\"
+      - name: 打印环境信息（调试用）
+        run: |
+          dotnet --version
+          echo "工作目录：${{ github.workspace }}"
+          dir "${{ github.workspace }}" # 查看拉取的文件结构
         shell: pwsh
 
-      - name: 复制产物到输出目录
+      - name: 还原所有依赖（强制还原，避免缓存问题）
+        run: dotnet restore "${{ github.workspace }}" --force
+        shell: pwsh
+
+      - name: 编译项目（打印详细编译日志）
         run: |
-          $pluginName = "StrmAssistant"
-          if ("${{ github.ref_name }}" -eq "lite") { $pluginName += "Lite" }
-          mkdir -Force "${{ github.workspace }}\output"
-          copy "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\$pluginName.dll" "${{ github.workspace }}\output\"
-          # 若有 ChineseConverter.dll，一起复制
-          if (Test-Path "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\ChineseConverter.dll") {
-              copy "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\ChineseConverter.dll" "${{ github.workspace }}\output\"
+          # 先找解决方案文件（避免路径错）
+          $slnFile = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.sln" | Select-Object -First 1
+          if (-not $slnFile) {
+              Write-Error "未找到解决方案文件（.sln）"
+              exit 1
+          }
+          echo "找到解决方案文件：$($slnFile.FullName)"
+          
+          # 编译并打印详细日志
+          dotnet build "$($slnFile.FullName)" --configuration Release --no-restore --verbosity detailed
+        shell: pwsh
+
+      - name: 查看编译产物（确认 DLL 是否生成）
+        run: |
+          # 递归查找所有 Release 目录下的 DLL
+          $dllFiles = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "*.dll" | Where-Object { $_.FullName -match "Release" }
+          if (-not $dllFiles) {
+              Write-Error "编译后未生成任何 DLL 文件"
+              exit 1
+          }
+          echo "编译生成的 DLL 文件："
+          $dllFiles | Format-Table FullName, Name, Length
+        shell: pwsh
+
+      - name: 复制产物到输出目录（兼容任意路径）
+        run: |
+          # 创建输出目录
+          $outputDir = "${{ github.workspace }}\output"
+          mkdir -Force $outputDir | Out-Null
+          
+          # 根据分支命名插件
+          $pluginSuffix = ${{ github.ref_name == 'lite' && 'Lite' || '' }}
+          $targetDllName = "StrmAssistant$pluginSuffix.dll"
+          
+          # 查找目标 DLL（递归匹配名称）
+          $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter $targetDllName | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          if (-not $targetDll) {
+              # 若找不到带后缀的，找基础名称
+              $targetDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "StrmAssistant.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          }
+          
+          if (-not $targetDll) {
+              Write-Error "未找到 StrmAssistant 相关 DLL"
+              exit 1
+          }
+          
+          # 复制目标 DLL
+          echo "找到目标 DLL：$($targetDll.FullName)"
+          Copy-Item $targetDll.FullName -Destination "$outputDir\" -Force
+          
+          # 复制 ChineseConverter.dll（如果存在）
+          $chineseDll = Get-ChildItem "${{ github.workspace }}" -Recurse -Filter "ChineseConverter.dll" | Where-Object { $_.FullName -match "Release" } | Select-Object -First 1
+          if ($chineseDll) {
+              echo "找到 ChineseConverter.dll：$($chineseDll.FullName)"
+              Copy-Item $chineseDll.FullName -Destination "$outputDir\" -Force
+          } else {
+              echo "未找到 ChineseConverter.dll，跳过复制"
           }
         shell: pwsh
 

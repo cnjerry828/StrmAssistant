@@ -2,21 +2,14 @@ name: Build Plugin
 
 on:
   push:
-    branches:
-      - tab-ui
-      - simple-ui
-      - lite
+    branches: [tab-ui, simple-ui, lite]
   pull_request:
-    branches:
-      - tab-ui
-      - simple-ui
-      - lite
+    branches: [tab-ui, simple-ui, lite]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -26,40 +19,30 @@ jobs:
         with:
           dotnet-version: '6.x'
 
-      - name: Restore dependencies (包括 ILRepack)
-        run: dotnet restore StrmAssistant/StrmAssistant.csproj
+      - name: Restore dependencies
+        run: dotnet restore StrmAssistant.sln
 
-      - name: Build the project (Release 模式)
-        run: dotnet build StrmAssistant/StrmAssistant.csproj --configuration Release --no-restore
+      - name: Build the project
+        run: dotnet build StrmAssistant.sln --configuration Release --no-restore
 
-      - name: 安装 ILRepack (适配合并需求)
-        run: nuget install ILRepack -Version 2.0.42 -OutputDirectory ${{ github.workspace }}\packages
-
-      - name: 创建插件输出目录
-        run: if not exist "${{ github.workspace }}\output" mkdir "${{ github.workspace }}\output"
-
-      - name: 执行 ILRepack 合并 (适配分支命名规则)
-        run: |
-          # 定义插件名称（根据分支拼接 Lite 后缀）
-          $pluginName = "StrmAssistant"
-          if ("${{ github.ref_name }}" -eq "lite") { $pluginName += "Lite" }
-          
-          # 执行 ILRepack 合并（修正参数+路径）
-          & "${{ github.workspace }}\packages\ILRepack.2.0.42\tools\ILRepack.exe" `
-          /out:"${{ github.workspace }}\output\$pluginName.dll" `
-          /target:library `
-          /copyattrs `
-          /allowMultiple `
-          /union `
-          /zeropekind `
-          "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\$pluginName.dll" `
-          "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\ChineseConverter.dll" `
-          /lib:"${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1" `
-          /verbose
+      - name: 查看编译产物（调试用）
+        run: dir "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\"
         shell: pwsh
 
-      - name: Upload artifact (上传合并后的 DLL)
+      - name: 复制产物到输出目录
+        run: |
+          $pluginName = "StrmAssistant"
+          if ("${{ github.ref_name }}" -eq "lite") { $pluginName += "Lite" }
+          mkdir -Force "${{ github.workspace }}\output"
+          copy "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\$pluginName.dll" "${{ github.workspace }}\output\"
+          # 若有 ChineseConverter.dll，一起复制
+          if (Test-Path "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\ChineseConverter.dll") {
+              copy "${{ github.workspace }}\StrmAssistant\bin\Release\netstandard2.1\ChineseConverter.dll" "${{ github.workspace }}\output\"
+          }
+        shell: pwsh
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: StrmAssistant-${{ github.ref_name }}
-          path: ${{ github.workspace }}\output\*.dll
+          path: ${{ github.workspace }}\output\*
